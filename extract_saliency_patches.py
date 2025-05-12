@@ -10,7 +10,7 @@ from huggingface_hub import snapshot_download, from_pretrained_keras
 model = from_pretrained_keras("alexanderkroner/MSI-Net")
 hf_dir = snapshot_download(repo_id="alexanderkroner/MSI-Net")
 
-----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 
 def saliency(image):
     image = Image.open(image)
@@ -107,7 +107,7 @@ def postprocess_output(
 
     return output_array
 
----------------------------------------------------------
+# ---------------------------------------------------------
 
 # Places a 299x299 white square randomly with its center inside any blob's area in a binary image.
 def place_white_square_randomly_in_blob(binary_image):
@@ -156,7 +156,7 @@ def extract_focus_patch(image_path, top_focus, samples):
         cv2.imwrite(f"../top{int(top_focus*100)}/{image_path.split('.')[0]}/{i}.jpg", masked_image)
 
 
------------------------------------------------------------
+# -----------------------------------------------------------
 
 
 
