@@ -111,7 +111,7 @@ def postprocess_output(
 
 # Places a 299x299 white square randomly with its center inside any blob's area in a binary image.
 def place_white_square_randomly_in_blob(binary_image):
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_image)
 
     if num_labels <= 1:
         raise ValueError("No blobs found in the image.")
@@ -124,7 +124,7 @@ def place_white_square_randomly_in_blob(binary_image):
     center_x = blob_pixels[1][random_index]
     center_y = blob_pixels[0][random_index]
 
-    output = np.zeros_like(binary)
+    output = np.zeros_like(binary_image)
 
     half_size = 299 // 2
     top_left_x = max(center_x - half_size, 0)
@@ -137,7 +137,7 @@ def place_white_square_randomly_in_blob(binary_image):
     return output
 
 def apply_mask_to_image_and_crop(input_image, mask):
-    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     x, y, w, h = cv2.boundingRect(contours[0])
     cropped_image = input_image[y:y+h, x:x+w]
     return cropped_image
