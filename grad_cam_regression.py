@@ -83,7 +83,7 @@ def load_and_preprocess_image(img_path, target_size = (299, 299)):
   # Original image unprocessed of shape (299, 299, 3) for visualization 
   return preprocessed, original_img
 
-def run_gradcam_on_image(img_path, save_dir=SAVE_DIR):
+def run_gradcam_on_image(img_path, save_dir='/content/drive/MyDrive/Colab_Notebooks/Results'):
   # Extract base image name
   image_basename = os.path.splitext(os.path.basename(img_path))[0]
 
@@ -101,7 +101,7 @@ def run_gradcam_on_image(img_path, save_dir=SAVE_DIR):
     cam = superimpose_heatmap(heatmap, original_img)
 
     # Save each heatmap overlay image in Google Drive folder
-    save_path = os.path.join(image_folder, f"{score}.jpg")
+    save_path = os.path.join(image_folder, f"{image_basename}_{score}.jpg")
     cv2.imwrite(save_path, cv2.cvtColor(cam, cv2.COLOR_RGB2BGR))
     print(f"Saved Grad-CAM of '{image_basename}' for '{score}' in: {save_path}")
 
