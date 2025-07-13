@@ -6,3 +6,10 @@ Pillow
 opencv-python
 matplotlib
 huggingface_hub
+pytorch
+torchvision
+torchaudio
+tqdm
+libjpeg-turbo
+onnx
+onnxruntime

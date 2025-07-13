@@ -1,27 +1,28 @@
 import os
 import numpy as np
 import pandas as pd
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import load_img, img_to_array
-from tensorflow.keras.applications.inception_v3 import preprocess_input
+from PIL import Image
+import onnxruntime as ort
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from tqdm import tqdm
 
-PATCHES = True
+PATCHES = False
 
+# === Percorsi ===
 try:
     from google.colab import drive
     drive.mount('/content/drive')
     BASE = '/content/drive/MyDrive'
     VOTES_CSV  = os.path.join(BASE, 'datasets/eva-dataset-master/data/votes_filtered.csv')
     IMAGES_DIR = os.path.join(BASE, 'datasets/eva-dataset-master/images/EVA_together')
-    MODEL_PATH = os.path.join(BASE, 'models/inception_multiout_final.keras')
+    MODEL_PATH = os.path.join(BASE, 'models/inception_multiout_final.onnx')
     PATCH_DIR = os.path.join(BASE, 'datasets/top50')
     print("Mounted Google Drive and set dataset paths.")
 except ImportError:
     BASE = '.'
     VOTES_CSV  = os.path.join(BASE, 'datasets/eva-dataset-master/data/votes_filtered.csv')
     IMAGES_DIR = os.path.join(BASE, 'datasets/eva-dataset-master/images/EVA_together')
-    MODEL_PATH = os.path.join(BASE, 'model/inception_multiout_final.keras')
+    MODEL_PATH = os.path.join(BASE, 'model/inception_multiout_final.onnx')
     PATCH_DIR = os.path.join(BASE, 'datasets/top50/content/EVA_together')
 
 TARGET_SIZE = (299, 299)
@@ -37,7 +38,7 @@ means = (
 means['image_id'] = means['image_id'].astype(str)
 means = means.rename(columns={'score':'total'})
 
-filepaths, image_ids, y_true = [], [], []  # each entry of y true: [total, difficulty, visual, composition, quality, semantic]
+filepaths, image_ids, y_true = [], [], []
 names = ['total','difficulty','visual','composition','quality','semantic']
 
 if PATCHES:
@@ -64,26 +65,29 @@ else:
         image_ids.append(img_id)
         y_true.append(row[names].iloc[0].values)
 
+y_true = np.vstack(y_true) # shape (n_samples,6)
 
-y_true = np.vstack(y_true)  # shape (n_samples,6)
+session = ort.InferenceSession(MODEL_PATH)
+input_name = session.get_inputs()[0].name
+output_name = session.get_outputs()[0].name
 
-model = load_model(MODEL_PATH)
 preds = []
-for fp in filepaths:
-    img = load_img(fp, target_size=TARGET_SIZE)
-    x   = img_to_array(img)
-    x   = np.expand_dims(x, axis=0)
-    x   = preprocess_input(x)
-    p   = model.predict(x, verbose=0)[0]  # array shape (6,)
-    preds.append(p)
-preds = np.vstack(preds)  # shape (n_samples,6)
+for fp in tqdm(filepaths, desc="Running inference", unit="img", total=len(filepaths)):
+    img = Image.open(fp).convert('RGB')
+    img = img.resize(TARGET_SIZE)
+    x = np.asarray(img).astype(np.float32) / 255.0
+    x = (x - 0.5) / 0.5
+    input_tensor = np.expand_dims(x, axis=0).astype(np.float32)
+    input_tensor = np.ascontiguousarray(input_tensor)
+    pred = session.run([output_name], {input_name: input_tensor})[0][0]  # shape (6,)
+    preds.append(pred)
+preds = np.vstack(preds)
 
 if PATCHES:
     df = pd.DataFrame(preds, columns=names)
     df['image_id'] = image_ids
     df_agg = df.groupby('image_id', as_index=False)[names].mean()
 
-    # Ground truth per image
     df_truth = means[['image_id'] + names]
     df_eval  = pd.merge(df_agg, df_truth, on='image_id', suffixes=('_pred',''))
 
