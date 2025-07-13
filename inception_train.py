@@ -12,7 +12,6 @@ from torchvision import transforms, models
 from torchvision.models import Inception_V3_Weights
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models.inception import InceptionOutputs
-import torch.onnx
 
 # === Device setup ===
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -224,18 +223,3 @@ if __name__ == "__main__":
     print(f"Test: Loss = {test_loss:.4f}, MAE = {test_mae:.4f}")
 
     torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, 'inception_multiout_final.pth'))
-
-    # === Export to ONNX ===
-    model.eval()
-    dummy_input = torch.randn(1, 3, 299, 299).to(device)
-    onnx_path = os.path.join(CHECKPOINT_DIR, "inception_multiout_final.onnx")
-    torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_path,
-        input_names=["input"],
-        output_names=["scores"],
-        dynamic_axes={"input": {0: "batch_size"}, "scores": {0: "batch_size"}},
-        opset_version=13
-    )
-    print(f"ONNX model exported in: {onnx_path}")

@@ -2,27 +2,30 @@ import os
 import numpy as np
 import pandas as pd
 from PIL import Image
-import onnxruntime as ort
+import torch
+import torch.nn as nn
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from tqdm import tqdm
+from torchvision import transforms, models
+from torchvision.models import Inception_V3_Weights
+from torchvision.models.inception import InceptionOutputs
 
-PATCHES = False
+PATCHES = True
 
-# === Percorsi ===
 try:
     from google.colab import drive
     drive.mount('/content/drive')
     BASE = '/content/drive/MyDrive'
     VOTES_CSV  = os.path.join(BASE, 'datasets/eva-dataset-master/data/votes_filtered.csv')
     IMAGES_DIR = os.path.join(BASE, 'datasets/eva-dataset-master/images/EVA_together')
-    MODEL_PATH = os.path.join(BASE, 'models/inception_multiout_final.onnx')
+    MODEL_PATH = os.path.join(BASE, 'models/inception_multiout_final.pth')
     PATCH_DIR = os.path.join(BASE, 'datasets/top50')
     print("Mounted Google Drive and set dataset paths.")
 except ImportError:
     BASE = '.'
     VOTES_CSV  = os.path.join(BASE, 'datasets/eva-dataset-master/data/votes_filtered.csv')
     IMAGES_DIR = os.path.join(BASE, 'datasets/eva-dataset-master/images/EVA_together')
-    MODEL_PATH = os.path.join(BASE, 'model/inception_multiout_final.onnx')
+    MODEL_PATH = os.path.join(BASE, 'model/inception_multiout_final.pth')
     PATCH_DIR = os.path.join(BASE, 'datasets/top50/content/EVA_together')
 
 TARGET_SIZE = (299, 299)
@@ -65,22 +68,51 @@ else:
         image_ids.append(img_id)
         y_true.append(row[names].iloc[0].values)
 
-y_true = np.vstack(y_true) # shape (n_samples,6)
+y_true = np.vstack(y_true)
 
-session = ort.InferenceSession(MODEL_PATH)
-input_name = session.get_inputs()[0].name
-output_name = session.get_outputs()[0].name
+class InceptionMultiOut(nn.Module):
+    def __init__(self):
+        super().__init__()
+        weights = Inception_V3_Weights.DEFAULT
+        base = models.inception_v3(weights=weights, aux_logits=True)
+        base.AuxLogits = None
+        base.fc = nn.Identity()
+        self.base = base
+        self.head = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(2048, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 6)
+        )
+
+    def forward(self, x):
+        x = self.base(x)
+        if isinstance(x, InceptionOutputs):
+            x = x.logits
+        return self.head(x)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = InceptionMultiOut().to(device)
+model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+model.eval()
+
+transform = transforms.Compose([
+    transforms.Resize(TARGET_SIZE),
+    transforms.CenterCrop(TARGET_SIZE),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5]*3, [0.5]*3)
+])
 
 preds = []
 for fp in tqdm(filepaths, desc="Running inference", unit="img", total=len(filepaths)):
     img = Image.open(fp).convert('RGB')
-    img = img.resize(TARGET_SIZE)
-    x = np.asarray(img).astype(np.float32) / 255.0
-    x = (x - 0.5) / 0.5
-    input_tensor = np.expand_dims(x, axis=0).astype(np.float32)
-    input_tensor = np.ascontiguousarray(input_tensor)
-    pred = session.run([output_name], {input_name: input_tensor})[0][0]  # shape (6,)
+    x = transform(img).unsqueeze(0).to(device)  # shape (1,3,299,299)
+    with torch.no_grad():
+        out = model(x)
+    pred = out.cpu().numpy().squeeze(0)
     preds.append(pred)
+
 preds = np.vstack(preds)
 
 if PATCHES:

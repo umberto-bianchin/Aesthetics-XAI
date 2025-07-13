@@ -11,5 +11,3 @@ torchvision
 torchaudio
 tqdm
 libjpeg-turbo
-onnx
-onnxruntime
