@@ -6,6 +6,8 @@ from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from tensorflow.keras.applications.inception_v3 import preprocess_input
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
+PATCHES = True
+
 try:
     from google.colab import drive
     drive.mount('/content/drive')
@@ -13,12 +15,14 @@ try:
     VOTES_CSV  = os.path.join(BASE, 'datasets/eva-dataset-master/data/votes_filtered.csv')
     IMAGES_DIR = os.path.join(BASE, 'datasets/eva-dataset-master/images/EVA_together')
     MODEL_PATH = os.path.join(BASE, 'models/inception_multiout_final.keras')
+    PATCH_DIR = os.path.join(BASE, 'datasets/top50')
     print("Mounted Google Drive and set dataset paths.")
 except ImportError:
     BASE = '.'
     VOTES_CSV  = os.path.join(BASE, 'datasets/eva-dataset-master/data/votes_filtered.csv')
     IMAGES_DIR = os.path.join(BASE, 'datasets/eva-dataset-master/images/EVA_together')
     MODEL_PATH = os.path.join(BASE, 'model/inception_multiout_final.keras')
+    PATCH_DIR = os.path.join(BASE, 'datasets/top50/content/EVA_together')
 
 TARGET_SIZE = (299, 299)
 
@@ -33,17 +37,33 @@ means = (
 means['image_id'] = means['image_id'].astype(str)
 means = means.rename(columns={'score':'total'})
 
-filepaths = []
-y_true     = []  # each entry: [total, difficulty, visual, composition, quality, semantic]
-for fname in sorted(os.listdir(IMAGES_DIR)):
-    if not fname.lower().endswith(('.jpg','.jpeg','.png')):
-        continue
-    image_id = os.path.splitext(fname)[0]
-    row = means[means['image_id'] == image_id]
-    if row.empty:
-        continue
-    filepaths.append(os.path.join(IMAGES_DIR, fname))
-    y_true.append(row[['total','difficulty','visual','composition','quality','semantic']].iloc[0].values)
+filepaths, image_ids, y_true = [], [], []  # each entry of y true: [total, difficulty, visual, composition, quality, semantic]
+names = ['total','difficulty','visual','composition','quality','semantic']
+
+if PATCHES:
+    for img_id in sorted(os.listdir(PATCH_DIR)):
+        folder = os.path.join(PATCH_DIR, img_id)
+        if not os.path.isdir(folder): continue
+        row = means[means['image_id']==img_id]
+        if row.empty: continue
+        true_vals = row[names].iloc[0].values
+        for f in sorted(os.listdir(folder)):
+            if not f.lower().endswith(('.jpg','.jpeg','.png')): continue
+            fp = os.path.join(folder, f)
+            filepaths.append(fp)
+            image_ids.append(img_id)
+            y_true.append(true_vals)
+else:
+    for fname in sorted(os.listdir(IMAGES_DIR)):
+        if not fname.lower().endswith(('.jpg','.jpeg','.png')): continue
+        img_id = os.path.splitext(fname)[0]
+        row = means[means['image_id']==img_id]
+        if row.empty: continue
+        fp = os.path.join(IMAGES_DIR, fname)
+        filepaths.append(fp)
+        image_ids.append(img_id)
+        y_true.append(row[names].iloc[0].values)
+
 
 y_true = np.vstack(y_true)  # shape (n_samples,6)
 
@@ -58,7 +78,18 @@ for fp in filepaths:
     preds.append(p)
 preds = np.vstack(preds)  # shape (n_samples,6)
 
-names = ['total','difficulty','visual','composition','quality','semantic']
+if PATCHES:
+    df = pd.DataFrame(preds, columns=names)
+    df['image_id'] = image_ids
+    df_agg = df.groupby('image_id', as_index=False)[names].mean()
+
+    # Ground truth per image
+    df_truth = means[['image_id'] + names]
+    df_eval  = pd.merge(df_agg, df_truth, on='image_id', suffixes=('_pred',''))
+
+    y_true = df_eval[names].values
+    preds  = df_eval[[n+'_pred' for n in names]].values
+
 metrics = []
 for i, name in enumerate(names):
     yt   = y_true[:, i]
