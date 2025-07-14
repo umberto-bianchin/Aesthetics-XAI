@@ -124,7 +124,7 @@ python grad_cam_regression.py
 We adapt Grad-CAM for regression by computing gradients of each output neuron w\.r.t. the final convolutional feature maps. Visualizations reveal that the model focuses on similar regions as human saliency, validating its interpretability.
 
 ## Model & Visualization
-- [Trained Inception Model + GradCAM Results]([https://huggingface.co/MateuszLis/saliency_patches_inception])
+- [Trained Inception Model + GradCAM Results](https://huggingface.co/MateuszLis/saliency_patches_inception)
 
 
 ---
