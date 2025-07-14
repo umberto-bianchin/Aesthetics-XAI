@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cv2
 from torchvision import models, transforms
+from torchvision.models.inception import InceptionOutputs
+from torchvision.models import Inception_V3_Weights
 from torch.nn import functional as F
 from PIL import Image
 from pathlib import Path
@@ -17,45 +19,52 @@ MODEL_PATH = '/content/drive/MyDrive/Colab_Notebooks/inception_multiout_final.pt
 IMG_PATH = '/content/drive/MyDrive/Colab_Notebooks/EVA_together/*.jpg'
 SAVE_DIR = '/content/drive/MyDrive/Colab_Notebooks/Results'
 
-# Define device
+# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load model
 class MultiOutputInception(torch.nn.Module):
-    def __init__(self, base_model):
-        super(MultiOutputInception, self).__init__()
-        self.base = base_model
-        self.gap = torch.nn.AdaptiveAvgPool2d((1, 1))
-        self.dropout1 = torch.nn.Dropout(0.5)
-        self.fc1 = torch.nn.Linear(2048, 256)
-        self.dropout2 = torch.nn.Dropout(0.3)
-        self.out = torch.nn.Linear(256, 6)
+    def __init__(self):
+        super().__init__()
+        weights = Inception_V3_Weights.DEFAULT
+        base = models.inception_v3(weights=weights, aux_logits=True)
+        base.AuxLogits = None  # Remove auxiliary classifier
+        base.fc = torch.nn.Identity()
+        self.base = base
+        self.head = torch.nn.Sequential(
+            torch.nn.Dropout(0.5),
+            torch.nn.Linear(2048, 256),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(256, 6)
+        )
 
     def forward(self, x):
         x = self.base(x)
-        x = self.gap(x)
-        x = torch.flatten(x, 1)
-        x = self.dropout1(x)
-        x = F.relu(self.fc1(x))
-        x = self.dropout2(x)
-        return self.out(x)
+        return self.head(x)
 
-inception = models.inception_v3(pretrained=True, aux_logits=False)
-inception.fc = torch.nn.Identity()  # remove the original classification head
-model = MultiOutputInception(inception).to(device)
-model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+# Load weights
+model = MultiOutputInception().to(device)
+state_dict = torch.load(MODEL_PATH, map_location=device)
+model.load_state_dict(state_dict)
 model.eval()
 
-last_conv_layer = model.base.Mixed_7c
+target_layer = model.base.Mixed_7c
 
-# Preprocessing and heatmap functions
+""" Check states
+state_dict = torch.load(MODEL_PATH)
+for k, v in state_dict.items():
+    print(k, v.shape)
+"""
+
+# Transform
 transform = transforms.Compose([
     transforms.Resize((299, 299)),
     transforms.ToTensor(),
     transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 ])
 
-def make_gradcam_heatmap(img_tensor, model, last_conv_layer, score_index):
+# GradCAM heatmap creation
+def make_gradcam_heatmap(img_tensor, model, target_layer, score_index):
     activations = []
     gradients = []
 
@@ -65,8 +74,8 @@ def make_gradcam_heatmap(img_tensor, model, last_conv_layer, score_index):
     def backward_hook(module, grad_in, grad_out):
         gradients.append(grad_out[0])
 
-    handle_fwd = last_conv_layer.register_forward_hook(forward_hook)
-    handle_bwd = last_conv_layer.register_full_backward_hook(backward_hook)
+    handle_fwd = target_layer.register_forward_hook(forward_hook)
+    handle_bwd = target_layer.register_full_backward_hook(backward_hook)
 
     model.zero_grad()
     output = model(img_tensor)
@@ -76,8 +85,8 @@ def make_gradcam_heatmap(img_tensor, model, last_conv_layer, score_index):
     activ = activations[0].squeeze(0)  # (C, H, W)
     grads = gradients[0].squeeze(0)    # (C, H, W)
 
-    weights = grads.mean(dim=(1, 2))
-    heatmap = torch.sum(weights[:, None, None] * activ, dim=0)
+    weights = grads.mean(dim=(1, 2))                            # (C,)
+    heatmap = torch.sum(weights[:, None, None] * activ, dim=0)  # (H, W)
     heatmap = torch.relu(heatmap)
     heatmap /= torch.max(heatmap)
     heatmap = heatmap.detach().cpu().numpy()
@@ -87,14 +96,7 @@ def make_gradcam_heatmap(img_tensor, model, last_conv_layer, score_index):
 
     return heatmap
 
-def superimpose_heatmap(heatmap, original_image, alpha=0.4):
-    heatmap = cv2.resize(heatmap, (original_image.shape[1], original_image.shape[0]))
-    heatmap = 1 - heatmap
-    heatmap = np.uint8(255 * heatmap)
-    heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    superimposed = cv2.addWeighted(original_image, 1 - alpha, heatmap_color, alpha, 0)
-    return superimposed
-
+# Image preprocessing
 def load_and_preprocess_image(img_path):
     original_img = cv2.imread(img_path)
     original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
@@ -102,6 +104,16 @@ def load_and_preprocess_image(img_path):
     img_tensor = transform(img).unsqueeze(0).to(device)
     return img_tensor, original_img
 
+# Heatmap superimposition on original image
+def superimpose_heatmap(heatmap, original_image, alpha=0.4):
+    heatmap = cv2.resize(heatmap, (original_image.shape[1], original_image.shape[0]))
+    heatmap = 1 - heatmap  # flip color importance
+    heatmap = np.uint8(255 * heatmap)
+    heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    superimposed = cv2.addWeighted(original_image, 1 - alpha, heatmap_color, alpha, 0)
+    return superimposed
+
+# Run gradCAM on images
 def run_gradcam_on_image(img_path, save_dir=SAVE_DIR):
     image_basename = Path(img_path).stem
     image_folder = os.path.join(save_dir, image_basename)
@@ -111,12 +123,13 @@ def run_gradcam_on_image(img_path, save_dir=SAVE_DIR):
     score_names = ['total', 'difficulty', 'visual', 'composition', 'quality', 'semantic']
 
     for i, score in enumerate(score_names):
-        heatmap = make_gradcam_heatmap(img_tensor, model, last_conv_layer, score_index=i)
+        heatmap = make_gradcam_heatmap(img_tensor, model, target_layer, score_index=i)
         cam = superimpose_heatmap(heatmap, original_img)
-        save_path = os.path.join(image_folder, f"{image_basename}_{score}.jpg")
+        save_path = os.path.join(image_folder, f"{score}.jpg")
         cv2.imwrite(save_path, cv2.cvtColor(cam, cv2.COLOR_RGB2BGR))
-        print(f"Saved Grad-CAM of '{image_basename}' for '{score}' in: {save_path}")
+        print(f"Saved: {save_path}")
 
+# Run Grad-CAM over all images
 image_paths = glob.glob(IMG_PATH)
 for image_path in image_paths:
     run_gradcam_on_image(image_path)
