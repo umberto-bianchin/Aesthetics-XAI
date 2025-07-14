@@ -1,110 +1,135 @@
 import os
 import glob
-import tensorflow as tf
+import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
-from tensorflow.keras.models import load_model
-from tensorflow.keras.applications.inception_v3 import preprocess_input
-from tensorflow.keras.preprocessing import image
+from torchvision import models, transforms
+from torchvision.models.inception import InceptionOutputs
+from torchvision.models import Inception_V3_Weights
+from torch.nn import functional as F
+from PIL import Image
+from pathlib import Path
+
+# Mount Google Drive if using Colab
 from google.colab import drive
 drive.mount('/content/drive')
 
-MODEL_PATH = '/content/drive/MyDrive/Colab_Notebooks/inception_multiout_final.keras'
+MODEL_PATH = '/content/drive/MyDrive/Colab_Notebooks/inception_multiout_final.pth'
 IMG_PATH = '/content/drive/MyDrive/Colab_Notebooks/EVA_together/*.jpg'
 SAVE_DIR = '/content/drive/MyDrive/Colab_Notebooks/Results'
 
-# Load model
-model = load_model(MODEL_PATH)
+# Set device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Get the last layer
-last_conv_layer_name = 'mixed10'
+class MultiOutputInception(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        weights = Inception_V3_Weights.DEFAULT
+        base = models.inception_v3(weights=weights, aux_logits=True)
+        base.AuxLogits = None  # Remove auxiliary classifier
+        base.fc = torch.nn.Identity()
+        self.base = base
+        self.head = torch.nn.Sequential(
+            torch.nn.Dropout(0.5),
+            torch.nn.Linear(2048, 256),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(256, 6)
+        )
 
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name, score_index):
+    def forward(self, x):
+        x = self.base(x)
+        return self.head(x)
 
-  # Create a sub model
-  grad_model = tf.keras.models.Model(model.input, [model.get_layer(last_conv_layer_name).output, model.output])    # ([model.inputs], [conv_output, predictions])
+# Load weights
+model = MultiOutputInception().to(device)
+state_dict = torch.load(MODEL_PATH, map_location=device)
+model.load_state_dict(state_dict)
+model.eval()
 
-  # Forward pass with GradientTape
-  with tf.GradientTape() as tape:
-    conv_outputs, predictions = grad_model([img_array])
-    loss = predictions[:, score_index]    # Select the target score
+target_layer = model.base.Mixed_7c
 
-  # Compute the gradient of the target score
-  grads = tape.gradient(loss, conv_outputs)
+""" Check states
+state_dict = torch.load(MODEL_PATH)
+for k, v in state_dict.items():
+    print(k, v.shape)
+"""
 
-  # Global average pooling of the gradient to get the importance vector
-  pooled_grads = tf.reduce_mean(grads, axis = (0, 1, 2))
+# Transform
+transform = transforms.Compose([
+    transforms.Resize((299, 299)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+])
 
-  # Reshape from (1, H, W, C) to (H, W, C)
-  conv_outputs = conv_outputs[0]
-  # Multiply each channel in the conv output by its corresponding importance weight and get a 2D (H, W)
-  heatmap = tf.reduce_sum(tf.multiply(pooled_grads, conv_outputs), axis = -1)
+# GradCAM heatmap creation
+def make_gradcam_heatmap(img_tensor, model, target_layer, score_index):
+    activations = []
+    gradients = []
 
-  # Applies a ReLU to only keep positive values
-  heatmap = tf.maximum(heatmap, 0)
-  # Normalize the heatmap 
-  heatmap /= tf.reduce_max(heatmap)
+    def forward_hook(module, input, output):
+        activations.append(output)
 
-  return heatmap.numpy()
+    def backward_hook(module, grad_in, grad_out):
+        gradients.append(grad_out[0])
 
-def superimpose_heatmap(heatmap, original_image, alpha = 0.4):
-  # Resize the 2D heatmap to the original image
-  heatmap = cv2.resize(heatmap, (original_image.shape[1], original_image.shape[0]))  #OpenCV uses (width, height)
+    handle_fwd = target_layer.register_forward_hook(forward_hook)
+    handle_bwd = target_layer.register_full_backward_hook(backward_hook)
 
-  # Convert the normalized heatmap from [0, 1] to [0, 255] for coloring
-  heatmap = 1 - heatmap # Correct the heatmap because colors are inverted
-  heatmap = np.uint8(255 * heatmap)
+    model.zero_grad()
+    output = model(img_tensor)
+    loss = output[0, score_index]
+    loss.backward()
 
-  # Applies colormap to greyscale image and get 3 channel colored heatmap (red = high importance, blue = low importance)
-  heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    activ = activations[0].squeeze(0)  # (C, H, W)
+    grads = gradients[0].squeeze(0)    # (C, H, W)
 
-  # Superimpose heatmap on original image
-  # output = (1-alpha)*image + alpha*heatmap where alpha is the opacity
-  superimposed = cv2.addWeighted(original_image, 1 - alpha, heatmap_color, alpha, 0) 
+    weights = grads.mean(dim=(1, 2))                            # (C,)
+    heatmap = torch.sum(weights[:, None, None] * activ, dim=0)  # (H, W)
+    heatmap = torch.relu(heatmap)
+    heatmap /= torch.max(heatmap)
+    heatmap = heatmap.detach().cpu().numpy()
 
-  return superimposed
+    handle_fwd.remove()
+    handle_bwd.remove()
 
-def load_and_preprocess_image(img_path, target_size = (299, 299)):
-  # Load original image for visualization in RGB
-  original_img = cv2.imread(img_path)
-  original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+    return heatmap
 
-  # Load + resize for model input
-  img = image.load_img(img_path, target_size = target_size)
-  # Convert image to numpy array of shape (299, 299, 3)
-  img_array = image.img_to_array(img)
-  # Expand input because Keras expects input size (1, 299, 299, 3)
-  img_array_exp = np.expand_dims(img_array, axis = 0)
-  preprocessed = preprocess_input(img_array_exp)
+# Image preprocessing
+def load_and_preprocess_image(img_path):
+    original_img = cv2.imread(img_path)
+    original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+    img = Image.open(img_path).convert('RGB')
+    img_tensor = transform(img).unsqueeze(0).to(device)
+    return img_tensor, original_img
 
-  # Return a tuple with
-  # Scaled pixels from [0, 255] to [-1, 1] 
-  # Original image unprocessed of shape (299, 299, 3) for visualization 
-  return preprocessed, original_img
+# Heatmap superimposition on original image
+def superimpose_heatmap(heatmap, original_image, alpha=0.4):
+    heatmap = cv2.resize(heatmap, (original_image.shape[1], original_image.shape[0]))
+    heatmap = 1 - heatmap  # flip color importance
+    heatmap = np.uint8(255 * heatmap)
+    heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    superimposed = cv2.addWeighted(original_image, 1 - alpha, heatmap_color, alpha, 0)
+    return superimposed
 
-def run_gradcam_on_image(img_path, save_dir='/content/drive/MyDrive/Colab_Notebooks/Results'):
-  # Extract base image name
-  image_basename = os.path.splitext(os.path.basename(img_path))[0]
+# Run gradCAM on images
+def run_gradcam_on_image(img_path, save_dir=SAVE_DIR):
+    image_basename = Path(img_path).stem
+    image_folder = os.path.join(save_dir, image_basename)
+    os.makedirs(image_folder, exist_ok=True)
 
-  # Create folder Results/image_basename
-  image_folder = os.path.join(save_dir, image_basename)
-  os.makedirs(image_folder, exist_ok=True)
-  
-  preprocessed_img, original_img = load_and_preprocess_image(img_path)
+    img_tensor, original_img = load_and_preprocess_image(img_path)
+    score_names = ['total', 'difficulty', 'visual', 'composition', 'quality', 'semantic']
 
-  # List of labes of scores
-  score_names = ['total', 'difficulty', 'visual', 'composition', 'quality', 'semantic']
-  
-  for i, score in enumerate(score_names):
-    heatmap = make_gradcam_heatmap(preprocessed_img, model, last_conv_layer_name, score_index = i)
-    cam = superimpose_heatmap(heatmap, original_img)
+    for i, score in enumerate(score_names):
+        heatmap = make_gradcam_heatmap(img_tensor, model, target_layer, score_index=i)
+        cam = superimpose_heatmap(heatmap, original_img)
+        save_path = os.path.join(image_folder, f"{score}.jpg")
+        cv2.imwrite(save_path, cv2.cvtColor(cam, cv2.COLOR_RGB2BGR))
+        print(f"Saved: {save_path}")
 
-    # Save each heatmap overlay image in Google Drive folder
-    save_path = os.path.join(image_folder, f"{image_basename}_{score}.jpg")
-    cv2.imwrite(save_path, cv2.cvtColor(cam, cv2.COLOR_RGB2BGR))
-    print(f"Saved Grad-CAM of '{image_basename}' for '{score}' in: {save_path}")
-
+# Run Grad-CAM over all images
 image_paths = glob.glob(IMG_PATH)
 for image_path in image_paths:
-  run_gradcam_on_image(image_path)
+    run_gradcam_on_image(image_path)
